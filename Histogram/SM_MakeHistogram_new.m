@@ -292,12 +292,23 @@ F=figure();
 
 plotHandle = axes('Parent',F);
 plotHistogram(plotHandle,hObject, eventdata, handles);
- 
+
+% Same overlays shown live in the GUI (redrawPlot), baked into the saved image too.
+% ranges go on first so the fit curve below draws on top of the shading, and
+% persistHandles=false keeps this from touching the live GUI's label/range state.
+if ~isempty(handles.bobaResults) && get(handles.showRanges,'Value')==1
+    drawBobaRanges(hObject, eventdata, handles, plotHandle, false);
+end
+
  if handles.fitFlag==1
    CurveFitData=fitGaussPlots(plotHandle,handles.R2_value,handles.parameter,hObject, eventdata, handles);
    save(strcat(fName_Picture,'_CurveFitData.dat'), 'CurveFitData', '-ascii');
  end
- 
+
+if ~isempty(handles.bobaResults) && get(handles.showLabels,'Value')==1
+    drawBobaLabels(hObject, eventdata, handles, plotHandle, false);
+end
+
  box off;
  %% Now plot results.
 saveas(gcf,strcat(fName_Picture,'.jpg'));
@@ -424,13 +435,22 @@ handles.bobaLabelOffsets=zeros(size(handles.bobaLabelOffsets));
 guidata(hObject, handles);
 redrawPlot(hObject, eventdata, handles);
 
-function drawBobaLabels(hObject, eventdata, handles)
+function drawBobaLabels(hObject, eventdata, handles, ax, persistHandles)
 % Draws (or redraws) the "State k: pop% +/- sd%" labels at each fitted peak.
 % This only places text on top of the existing plot; it reads handles.bobaResults
 % (already computed by boba_Callback) and never recomputes or changes it.
+%
+% ax             axes to draw into (default: the live GUI plot, handles.histogramPlot).
+%                 Pass a different axes (e.g. the Save button's off-screen figure) to
+%                 put the same labels on a saved image.
+% persistHandles  true (default) stores the new label handles/positions back into
+%                 handles via guidata, and makes labels draggable, as in the live GUI.
+%                 Pass false for a one-off target (like a Save figure that gets closed
+%                 right after) so this call can't overwrite the live GUI's label state.
+if nargin<4 || isempty(ax),             ax = handles.histogramPlot; end
+if nargin<5 || isempty(persistHandles), persistHandles = true;       end
 r=handles.bobaResults;
 K=numel(r.full.mu);
-ax=handles.histogramPlot;
 if ~isequal(size(handles.bobaLabelOffsets),[K 2])
     handles.bobaLabelOffsets=zeros(K,2);   % number of states changed since the last fit; drop old offsets
 end
@@ -442,16 +462,23 @@ for k=1:K
     defaultPos(k,:)=[r.full.mu(k), r.full.amp(k)+yOffset];
     pos=defaultPos(k,:)+handles.bobaLabelOffsets(k,:);
     labelStr=sprintf('State %d\n%.1f%% \\pm %.1f%%', k, 100*r.summary.popMean(k), 100*r.summary.popStd(k));
+    if persistHandles
+        buttonDownFcn = @(src,evt) startDragLabel(src,evt,ancestor(ax,'figure'));
+    else
+        buttonDownFcn = '';   % a one-off (e.g. saved) copy is never dragged
+    end
     labels(k)=text(ax, pos(1), pos(2), labelStr, 'HorizontalAlignment','center', ...
         'FontSize',9, 'FontWeight','bold', 'Color',[0 0 0.6], 'Margin',1, ...
-        'ButtonDownFcn', @(src,evt) startDragLabel(src,evt,ancestor(ax,'figure')), 'UserData', k);
+        'ButtonDownFcn', buttonDownFcn, 'UserData', k);
 end
 hold(ax,'off');
-handles.bobaLabels=labels;
-handles.bobaLabelDefaultPos=defaultPos;
-guidata(hObject, handles);
+if persistHandles
+    handles.bobaLabels=labels;
+    handles.bobaLabelDefaultPos=defaultPos;
+    guidata(hObject, handles);
+end
 
-function drawBobaRanges(hObject, eventdata, handles)
+function drawBobaRanges(hObject, eventdata, handles, ax, persistHandles)
 % Cosmetic only: shades each state's mean +/- 1 SD range (a low-opacity patch)
 % and draws a dashed border line at each edge. Reads handles.bobaResults
 % (already computed by boba_Callback) and does not recompute or change it.
@@ -460,9 +487,12 @@ function drawBobaRanges(hObject, eventdata, handles)
 % i.e. how broad that Gaussian is -- not the bootstrap uncertainty on its
 % center (summary.muStd), which is a different, usually much smaller, number.
 % Swap r.full.sigma for r.summary.muStd below if you want the latter instead.
+%
+% ax, persistHandles -- same meaning as in drawBobaLabels, above.
+if nargin<4 || isempty(ax),             ax = handles.histogramPlot; end
+if nargin<5 || isempty(persistHandles), persistHandles = true;       end
 r=handles.bobaResults;
 K=numel(r.full.mu);
-ax=handles.histogramPlot;
 yl=ylim(ax);   % lock to the current y-range so patches/lines don't autoscale it
 
 % One color per state, cycled if there are more states than colors.
@@ -603,9 +633,18 @@ title(plotHandle,get(handles.plotTitle,'String'), 'FontSize', str2double(get(han
 if isfield(handles,'bobaResults') && ~isempty(handles.bobaResults) && get(handles.showErrorBars,'Value')==1
     se=handles.bobaResults.hist.se;
     hold(plotHandle,'on');
-    errorbar(plotHandle, centers, norm_T_histCount, se, se, 'LineStyle','none', 'Color',[0 0 0], 'LineWidth',1.2, 'CapSize',4);
+    %errorbar(plotHandle, centers, norm_T_histCount, se, se, 'LineStyle','none', 'Color',[0 0 0], 'LineWidth',1.2, 'CapSize',4);
+     % Envelope lines: trace the top and bottom of the error bars across every
+    % bin, instead of (or in addition to) the individual whiskers above.
+    upperEnv = norm_T_histCount + se;
+    lowerEnv = max(norm_T_histCount - se, 0);   % a count can't go negative
+    plot(plotHandle, centers, upperEnv, '-', 'Color',[0.1 0.3 0.6], 'LineWidth',1);
+    plot(plotHandle, centers, lowerEnv, '-', 'Color',[0.6 0.3 0.1], 'LineWidth',1);
     hold(plotHandle,'off');
 end
+% noralized count can never be negative, so clamp y-axis to 0
+yl=ylim(plotHandle);
+ylim(plotHandle,[0, yl(2)]);
 guidata(hObject, handles);
 %=======================================================================================================================================================
 function theError = fitgauss(lambda, t, y)
