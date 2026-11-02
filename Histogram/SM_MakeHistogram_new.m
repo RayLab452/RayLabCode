@@ -84,10 +84,23 @@ handles.showErrorBars = uicontrol(hObject,'Style','checkbox','Units','characters
     'Position',[127 17.4 21 1.7],'String','Show error bars','Value',1, ...
     'BackgroundColor',figColor, ...
     'Callback',@(src,evt) showErrorBars_Callback(src,evt,guidata(src)));
+handles.showShading = uicontrol(hObject,'Style','checkbox','Units','characters', ...
+    'Position',[109 17.4 17 1.7],'String','Shade band','Value',1, ...
+    'BackgroundColor',figColor, ...
+    'Callback',@(src,evt) showErrorBars_Callback(src,evt,guidata(src)));
 handles.showLabels = uicontrol(hObject,'Style','checkbox','Units','characters', ...
     'Position',[127 15.7 21 1.7],'String','Show state labels','Value',1, ...
     'BackgroundColor',figColor, ...
     'Callback',@(src,evt) showErrorBars_Callback(src,evt,guidata(src)));
+% Friendlier front end for the "Range (+/-sigma)" box further down (rangeSigmaMultiplier):
+% pick a preset here instead of typing a multiplier by hand. Picking a preset writes
+% the corresponding number into that box and redraws; typing directly into that box
+% still works too, and switches this popup to "Custom" (see rangeSigmaMultiplier_Callback).
+handles.rangeSigmaPreset = uicontrol(hObject,'Style','popupmenu','Units','characters', ...
+    'Position',[109 15.7 17 1.7], ...
+    'String',{'1 sigma (~68%)','1.5 sigma (~87%)','2 sigma (~95%)','3 sigma (~99.7%)','Custom'}, ...
+    'Value',1,'BackgroundColor','white', ...
+    'Callback',@(src,evt) rangeSigmaPreset_Callback(src,evt,guidata(src)));
 handles.resetLabelsButton = uicontrol(hObject,'Style','pushbutton','Units','characters', ...
     'Position',[127 13.2 21 1.9],'String','Reset label positions','FontSize',9, ...
     'Callback',@(src,evt) resetLabels_Callback(src,evt,guidata(src)));
@@ -95,6 +108,36 @@ handles.showRanges = uicontrol(hObject,'Style','checkbox','Units','characters', 
     'Position',[127 11.0 21 1.7],'String','Show state ranges','Value',1, ...
     'BackgroundColor',figColor, ...
     'Callback',@(src,evt) showErrorBars_Callback(src,evt,guidata(src)));
+
+% The "sigma:" box above, and every fitted width in this program, is the
+% Gaussian's standard deviation -- gaussian() below and bobaFRET.m's
+% gaussianSigma() are both parameterized directly in sigma, with no FWHM
+% conversion anywhere in the fitting math.
+%
+% How many standard deviations the shaded state-range overlay (drawBobaRanges)
+% extends on each side of a state's center. 1 = the classic +/-1 sigma band;
+% 1.96 ~= a 95% interval; etc. Positions here may need a small nudge once you
+% see them rendered -- this corner of the panel is already fairly crowded.
+handles.rangeSigmaLabel = uicontrol(hObject,'Style','text','Units','characters', ...
+    'Position',[127 2.0 12 1.7],'String','Range (+/-sigma):', ...
+    'HorizontalAlignment','left','BackgroundColor',figColor);
+handles.rangeSigmaMultiplier = uicontrol(hObject,'Style','edit','Units','characters', ...
+    'Position',[140 2.0 8 1.7],'String','1','BackgroundColor','white', ...
+    'Callback',@(src,evt) rangeSigmaMultiplier_Callback(src,evt,guidata(src)));
+
+% States below this population (as a %, of the FULL-DATA fit) are treated as
+% noise/non-states and left out of the result: not shown as a label or shaded
+% range, not counted in the BOBA bootstrap result popup, and not written to the
+% _BOBA.csv file. Default 0.5 means a state fitted at under 0.5% population is
+% ignored. This never changes the fit itself (all K Gaussians are still fit and
+% still count toward every other state's population) -- it only filters what
+% gets reported afterward. Same row as the range-sigma box, reusing the same
+% right edge the button column already established.
+handles.minPopPercentLabel = uicontrol(hObject,'Style','text','Units','characters', ...
+    'Position',[149.8 2.0 16 1.7],'String','Min population (%):', ...
+    'HorizontalAlignment','left','BackgroundColor',figColor);
+handles.minPopPercent = uicontrol(hObject,'Style','edit','Units','characters', ...
+    'Position',[167 2.0 7 1.7],'String','0.5','BackgroundColor','white');
 
 % Update handles structure
 guidata(hObject, handles);
@@ -157,7 +200,7 @@ function [R2_value,parameter]=fitGaussMath(hObject, eventdata, handles)
 centers=handles.histogramData(1,:);
 norm_T_histCount=handles.histogramData(2,:);
 in_Centers=str2double(split(get(handles.in_Centers,'String'),","));
-in_sigma=str2double(split(get(handles.in_sigma,'String'),","));
+in_sigma=str2double(split(get(handles.in_sigma,'String'),","));   % standard deviation -- gaussian() below takes sigma directly
 initialGuesses=[in_Centers in_sigma];
 startingGuesses = reshape(initialGuesses', 1, []);
 %%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -221,7 +264,7 @@ CM = jet(numGaussians);
 		thisEstimatedCurve(:,k) = c(k) .* gaussian(tFit2, means(k), widths(k));
         hold on;
         plot(figureHandle,tFit2, thisEstimatedCurve(:,k),'color',CM(k,:), 'LineWidth', str2double(get(handles.fitThickness,'String'))-1);
-	    statement{k}= strcat('peak ', num2str(k),': ',num2str(means(k),1),char(177),num2str(widths(k),1) );
+	    statement{k}= strcat('peak ', num2str(k),': ',num2str(means(k),1),char(177),num2str(widths(k),1),' \sigma' );
     end
 % Overall curve estimate is the sum of the component curves.
 yhat2 = sum(thisEstimatedCurve,2);
@@ -322,7 +365,7 @@ HistData=handles.histogramData';
 save(strcat(fName_Picture,'_Histdata.dat'), 'HistData', '-ascii');
 
 if ~isempty(handles.bobaResults)
-    writeBobaSummary(strcat(fName_Picture,'_BOBA.csv'), handles.bobaResults);
+    writeBobaSummary(strcat(fName_Picture,'_BOBA.csv'), handles.bobaResults, handles);
 end
 if ~isempty(handles.spreadResults)
     writeSpreadSummary(strcat(fName_Picture,'_MoleculeSpread.csv'), handles.spreadResults);
@@ -362,13 +405,23 @@ nBoot=round(str2double(get(handles.nBoot,'String')));
 if isnan(nBoot) || nBoot<10
     errordlg('Bootstrap replicates must be a number of at least 10.','BOBA bootstrap'); return
 end
-% Same starting guesses as the Fit Gaussian button: [center1 fwhm1 center2 fwhm2 ...]
+% Same starting guesses as the Fit Gaussian button: [center1 sigma1 center2 sigma2 ...]
+% (bobaFRET.m, like gaussian() above, is parameterized directly in sigma.)
 in_Centers=str2double(split(get(handles.in_Centers,'String'),","));
 in_sigma=str2double(split(get(handles.in_sigma,'String'),","));
 if numel(in_Centers)~=numel(in_sigma) || any(isnan([in_Centers; in_sigma]))
     errordlg('Centers and sigma must be lists of numbers of equal length.','BOBA bootstrap'); return
 end
 startGuess=reshape([in_Centers in_sigma]', 1, []);
+% If Fit Gaussian has been run, start BOBA from ITS solution (the red curve) instead of the
+% raw guess boxes, so the bootstrap's full-data fit begins where the GUI fit ended up.
+% bobaFRET sorts states by center itself, so the order here doesn't matter. Falls back to
+% the guess boxes if no fit exists yet, or if the number of states no longer matches
+% (e.g. the boxes were edited after fitting).
+if handles.fitFlag==1 && numel(handles.parameter)==numel(startGuess)
+    startGuess=handles.parameter(:)';
+    startGuess(2:2:end)=abs(startGuess(2:2:end));   % widths are sigmas, must be positive
+end
 set(hObject,'Enable','off','String','Running...'); drawnow;
 restoreButton=onCleanup(@() set(hObject,'Enable','on','String','BOBA bootstrap'));
 try
@@ -379,10 +432,27 @@ end
 guidata(hObject, handles);
 redrawPlot(hObject, eventdata, handles);   % show the error bars on the histogram
 r=handles.bobaResults; s=r.summary;
-msg=cell(1,numel(s.popMean)+1);
-msg{1}=sprintf('%d molecules, %d/%d replicates converged, fit R^2 = %.3f', r.nMolecules, r.boot.nValid, r.boot.nBoot, r.full.R2);
+keep=statesAboveMinPop(r.full.pop, handles);   % states below "Min population (%)" are left out of this report
+msg={sprintf('%d molecules, %d/%d replicates converged, fit R^2 = %.3f', r.nMolecules, r.boot.nValid, r.boot.nBoot, r.full.R2)};
+rangeMult = str2double(get(handles.rangeSigmaMultiplier,'String'));
+if any(~keep)
+    msg{end+1}=sprintf('(%d state(s) below %s%% population hidden)', sum(~keep), get(handles.minPopPercent,'String'));
+end
+if isnan(rangeMult) || rangeMult <=0
+    rangeMult = 1; %same fallback as drawBobaRanges
+end
 for k=1:numel(s.popMean)
-    msg{k+1}=sprintf('State %d: center %.3f +/- %.3f, population %.3f +/- %.3f', k, s.muMean(k), s.muStd(k), s.popMean(k), s.popStd(k));
+    if ~keep(k), continue; end
+    mu = r.full.mu(k);  sg = r.full.sigma(k);
+    msg{end+1}=sprintf('State %d: center %.3f +/- %.3f, population %.3f +/- %.3f (%g sigma)', k, s.muMean(k), s.muStd(k), s.popMean(k), s.popStd(k));
+    % 1) sigma of the fitted Gaussian itself
+    msg{end+1}=sprintf('     95%% range (center +/- 1.96 sigma): %.3f to %.3f', mu-rangeMult*sg, mu+rangeMult*sg);
+    % 2) bootstrap sigma CI on the center
+    m = r.boot.mu(:,k);  m = sort(m(~isnan(m)));
+    if numel(m) >= 20
+        ci = m([max(1,round(0.025*numel(m))), min(numel(m),round(0.975*numel(m)))]);
+        msg{end+1}=sprintf('     center 95%% CI (bootstrap): %.3f to %.3f', ci(1), ci(2));
+    end
 end
 msgbox(msg,'BOBA bootstrap result');
 
@@ -435,6 +505,50 @@ handles.bobaLabelOffsets=zeros(size(handles.bobaLabelOffsets));
 guidata(hObject, handles);
 redrawPlot(hObject, eventdata, handles);
 
+function rangeSigmaPreset_Callback(hObject, eventdata, handles)
+% Picking a preset writes the matching multiplier into the "Range (+/-sigma)"
+% box and redraws. "Custom" (the last entry) does nothing here -- it's only
+% ever selected automatically, when rangeSigmaMultiplier_Callback below sees
+% the box was hand-edited to a value that doesn't match a preset.
+presets = [1 1.5 2 3];   % sigma multipliers, in the same order as the popup's String
+idx = get(hObject,'Value');
+if idx <= numel(presets)
+    set(handles.rangeSigmaMultiplier,'String', num2str(presets(idx)));
+end
+guidata(hObject, handles);
+if isempty(handles.histogramData), return; end
+redrawPlot(hObject, eventdata, handles);
+
+function rangeSigmaMultiplier_Callback(hObject, eventdata, handles)
+% Typing directly into the "Range (+/-sigma)" box still works; this just keeps
+% the preset popup in sync -- "Custom" if the typed value doesn't match one of
+% the presets, otherwise the matching preset (so switching back and forth stays
+% consistent either way you edit it).
+presets = [1 1.5 2 3];
+val = str2double(get(hObject,'String'));
+match = find(abs(presets - val) < 1e-9, 1);
+if isempty(match)
+    set(handles.rangeSigmaPreset,'Value', numel(get(handles.rangeSigmaPreset,'String')));   % "Custom"
+else
+    set(handles.rangeSigmaPreset,'Value', match);
+end
+guidata(hObject, handles);
+if isempty(handles.histogramData), return; end
+redrawPlot(hObject, eventdata, handles);
+
+function keep = statesAboveMinPop(pop, handles)
+% True for each state whose FULL-DATA fit population is at or above the
+% "Min population (%)" box. pop is r.full.pop (one value per state, from the
+% full-data fit) -- the decision of whether a state counts as real is made
+% once, from the best available estimate, not re-evaluated per bootstrap
+% replicate. Every caller that reports/draws/exports states uses this same
+% mask, so "hidden" means hidden everywhere consistently.
+minPop = str2double(get(handles.minPopPercent,'String')) / 100;
+if isnan(minPop) || minPop < 0
+    minPop = 0;   % empty/invalid box = no filtering
+end
+keep = pop(:)' >= minPop;
+
 function drawBobaLabels(hObject, eventdata, handles, ax, persistHandles)
 % Draws (or redraws) the "State k: pop% +/- sd%" labels at each fitted peak.
 % This only places text on top of the existing plot; it reads handles.bobaResults
@@ -451,6 +565,7 @@ if nargin<4 || isempty(ax),             ax = handles.histogramPlot; end
 if nargin<5 || isempty(persistHandles), persistHandles = true;       end
 r=handles.bobaResults;
 K=numel(r.full.mu);
+keep=statesAboveMinPop(r.full.pop, handles);   % states below "Min population (%)" get no label
 if ~isequal(size(handles.bobaLabelOffsets),[K 2])
     handles.bobaLabelOffsets=zeros(K,2);   % number of states changed since the last fit; drop old offsets
 end
@@ -459,6 +574,7 @@ defaultPos=zeros(K,2);
 labels=gobjects(K,1);
 hold(ax,'on');
 for k=1:K
+    if ~keep(k), continue; end
     defaultPos(k,:)=[r.full.mu(k), r.full.amp(k)+yOffset];
     pos=defaultPos(k,:)+handles.bobaLabelOffsets(k,:);
     labelStr=sprintf('State %d\n%.1f%% \\pm %.1f%%', k, 100*r.summary.popMean(k), 100*r.summary.popStd(k));
@@ -483,10 +599,15 @@ function drawBobaRanges(hObject, eventdata, handles, ax, persistHandles)
 % and draws a dashed border line at each edge. Reads handles.bobaResults
 % (already computed by boba_Callback) and does not recompute or change it.
 %
-% "SD" here is the fitted state's own width (full.sigma = FWHM / 2.355),
-% i.e. how broad that Gaussian is -- not the bootstrap uncertainty on its
-% center (summary.muStd), which is a different, usually much smaller, number.
+% "SD" here is the fitted state's own width (full.sigma, the native Gaussian
+% parameter -- no FWHM conversion involved), i.e. how broad that Gaussian is --
+% not the bootstrap uncertainty on its center (summary.muStd), which is a
+% different, usually much smaller, number.
 % Swap r.full.sigma for r.summary.muStd below if you want the latter instead.
+%
+% The shaded band extends handles.rangeSigmaMultiplier standard deviations on
+% each side of the center (default 1, i.e. the classic +/-1 sigma band); change
+% the number in that box to widen/narrow it, e.g. 1.96 for a ~95% interval.
 %
 % ax, persistHandles -- same meaning as in drawBobaLabels, above.
 if nargin<4 || isempty(ax),             ax = handles.histogramPlot; end
@@ -494,6 +615,12 @@ if nargin<5 || isempty(persistHandles), persistHandles = true;       end
 r=handles.bobaResults;
 K=numel(r.full.mu);
 yl=ylim(ax);   % lock to the current y-range so patches/lines don't autoscale it
+
+rangeMult = str2double(get(handles.rangeSigmaMultiplier,'String'));
+if isnan(rangeMult) || rangeMult<=0
+    rangeMult = 1;   % fall back to the classic +/-1 sigma band if the box is empty/invalid
+end
+keep = statesAboveMinPop(r.full.pop, handles);   % states below "Min population (%)" get no shaded range
 
 % One color per state, cycled if there are more states than colors.
 % These are ordinary MATLAB [R G B] triplets (0-1 each). MATLAB patch/line
@@ -512,9 +639,10 @@ patches=gobjects(K,1);
 borders=gobjects(K,2);
 hold(ax,'on');
 for k=1:K
+    if ~keep(k), continue; end
     col=palette(mod(k-1,size(palette,1))+1,:);
-    lo=r.full.mu(k)-r.full.sigma(k);
-    hi=r.full.mu(k)+r.full.sigma(k);
+    lo=r.full.mu(k)-rangeMult*r.full.sigma(k);
+    hi=r.full.mu(k)+rangeMult*r.full.sigma(k);
     patches(k)=patch(ax,[lo hi hi lo],[yl(1) yl(1) yl(2) yl(2)],col, ...
         'FaceAlpha',0.15,'EdgeColor','none','HitTest','off');
     borders(k,1)=line(ax,[lo lo],yl,'Color',col,'LineWidth',1.2,'LineStyle','--','HitTest','off');
@@ -554,14 +682,23 @@ set(figHandle,'WindowButtonMotionFcn','');
 set(figHandle,'WindowButtonUpFcn','');
 guidata(figHandle, handles);
 
-function writeBobaSummary(fileName, r)
+function writeBobaSummary(fileName, r, handles)
+% handles is only used to read the "Min population (%)" box (statesAboveMinPop);
+% nothing here recomputes or changes the fit itself.
 fid=fopen(fileName,'w');
 if fid<0, warning('Could not write %s', fileName); return; end
 s=r.summary;
+keep=statesAboveMinPop(r.full.pop, handles);
 fprintf(fid,'molecules,%d,replicates_converged,%d,replicates_total,%d,R2_full_fit,%.4f\n', r.nMolecules, r.boot.nValid, r.boot.nBoot, r.full.R2);
-fprintf(fid,'state,center_mean,center_sd,fwhm_mean,fwhm_sd,population_mean,population_sd,population_ci95_low,population_ci95_high\n');
+if any(~keep)
+    fprintf(fid,'# %d state(s) below %s%% population omitted below (still counted in every other state''s population)\n', ...
+        sum(~keep), get(handles.minPopPercent,'String'));
+end
+fprintf(fid,'state,center_mean,center_sd,sigma_mean,sigma_sd,population_mean,population_sd,population_ci95_low,population_ci95_high\n');
 for k=1:numel(s.popMean)
-    fprintf(fid,'%d,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n', k, s.muMean(k), s.muStd(k), s.fwhmMean(k), s.fwhmStd(k), s.popMean(k), s.popStd(k), s.popCI95(1,k), s.popCI95(2,k));
+    if ~keep(k), continue; end
+    fprintf(fid,'%d,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n', k, s.muMean(k), s.muStd(k), s.sigmaMean(k), s.sigmaStd(k), ...
+        s.popMean(k), s.popStd(k), s.popCI95(1,k), s.popCI95(2,k));
 end
 % per-bin histogram values and their bootstrap error bars
 fprintf(fid,'\nbin_center,mean_normalized_count,bootstrap_se,ci95_low,ci95_high\n');
@@ -629,20 +766,36 @@ plotHandle.FontSize =str2double(get(handles.tickSize,'String'));
 ylabel(plotHandle,'Normalized Count', 'FontSize',str2double(get(handles.axisSize,'String')) );
 xlabel(plotHandle,'FRET Efficiency', 'FontSize',str2double(get(handles.axisSize,'String')) );
 title(plotHandle,get(handles.plotTitle,'String'), 'FontSize', str2double(get(handles.titleSize,'String')));
-% Bootstrap error bars (+/- 1 standard error of each bin), once the bootstrap has been run
-if isfield(handles,'bobaResults') && ~isempty(handles.bobaResults) && get(handles.showErrorBars,'Value')==1
+% Bootstrap error bars (+/- 1 standard error of each bin), once the bootstrap has been run.
+% The shaded band and the whisker caps toggle independently (showShading / showErrorBars).
+if isfield(handles,'bobaResults') && ~isempty(handles.bobaResults)
     se=handles.bobaResults.hist.se;
+    lo=norm_T_histCount-se;
+    hi=norm_T_histCount+se;
     hold(plotHandle,'on');
-    %errorbar(plotHandle, centers, norm_T_histCount, se, se, 'LineStyle','none', 'Color',[0 0 0], 'LineWidth',1.2, 'CapSize',4);
-     % Envelope lines: trace the top and bottom of the error bars across every
-    % bin, instead of (or in addition to) the individual whiskers above.
-    upperEnv = norm_T_histCount + se;
-    lowerEnv = max(norm_T_histCount - se, 0);   % a count can't go negative
-    plot(plotHandle, centers, upperEnv, '-', 'Color',[0.1 0.3 0.6], 'LineWidth',1);
-    plot(plotHandle, centers, lowerEnv, '-', 'Color',[0.6 0.3 0.1], 'LineWidth',1);
+    if get(handles.showShading,'Value')==1
+        % One closed polygon: forward along the upper bound, backward along
+        % the lower bound (fliplr on both halves). Drawn before the whiskers
+        % so the caps land on top of it.
+        % NOTE: the bootstrap SE band is often only a few pixels tall, so a
+        % low-alpha fill with no outline is effectively invisible (it has no
+        % minimum render width the way a line does). A visible edge color
+        % traces the upper/lower bounds as actual lines regardless of how
+        % thin the fill is, and a higher FaceAlpha keeps the fill itself
+        % visible even stacked under the state-range shading.
+        fill(plotHandle, [centers fliplr(centers)], [hi fliplr(lo)], [0.25 0.25 0.25], ...
+            'FaceAlpha',0.4, 'EdgeColor',[0.25 0.25 0.25], 'LineWidth',1, 'HitTest','off');
+    end
+    if get(handles.showErrorBars,'Value')==1
+        errorbar(plotHandle, centers, norm_T_histCount, se, se, 'LineStyle','none', 'Color',[0 0 0], 'LineWidth',1.2, 'CapSize',4);
+    end
     hold(plotHandle,'off');
 end
-% noralized count can never be negative, so clamp y-axis to 0
+% A normalized count can never be negative, so the y-axis never should be
+% either -- MATLAB's default autoscale otherwise pads a bit of blank space
+% below zero (visible as a gap under the bars). Keep whatever top MATLAB
+% chose (it already accounts for the error bar caps above); just clamp the
+% bottom to exactly 0.
 yl=ylim(plotHandle);
 ylim(plotHandle,[0, yl(2)]);
 guidata(hObject, handles);
@@ -734,13 +887,15 @@ catch ME
 	uiwait(warndlg(message));
 end
 %=======================================================================================================================================================
-function g = gaussian(x, peakPosition, width)
-%  gaussian(x,pos,wid) = gaussian peak centered on pos, half-width=wid
-%  x may be scalar, vector, or matrix, pos and wid both scalar
-%  T. C. O'Haver, 1988
-% Examples: gaussian([0 1 2],1,2) gives result [0.5000    1.0000    0.5000]
-% plot(gaussian([1:100],50,20)) displays gaussian band centered at 50 with width 20.
-g = exp(-((x - peakPosition) ./ (0.60056120439323 .* width)) .^ 2);
+function g = gaussian(x, peakPosition, sigma)
+%  gaussian(x,pos,sigma) = gaussian peak centered on pos, with standard
+%  deviation sigma. x may be scalar, vector, or matrix; pos and sigma both scalar.
+%  Parameterized directly in sigma -- there is no FWHM conversion anywhere in
+%  this function or in bobaFRET.m's matching gaussianSigma(). (If you ever need
+%  FWHM for an external report, FWHM = 2*sqrt(2*ln(2))*sigma, but nothing in
+%  this program computes or relies on that quantity.)
+% Examples: gaussian([0 1 2],1,1) gives a peak centered at x=1 with sigma=1.
+g = exp(-((x - peakPosition) .^ 2) ./ (2 .* sigma .^ 2));
 %=======================================================================================================================================================
 function yhat = PlotComponentCurves(x, y, t, c, parameter)
 try
