@@ -550,7 +550,8 @@ end
 keep = pop(:)' >= minPop;
 
 function drawBobaLabels(hObject, eventdata, handles, ax, persistHandles)
-% Draws (or redraws) the "State k: pop% +/- sd%" labels at each fitted peak.
+% Draws (or redraws) the "State k: pop% +/- sd%" labels in a row along the top of the
+% plot, each centered over its state; overlapping labels stack downward.
 % This only places text on top of the existing plot; it reads handles.bobaResults
 % (already computed by boba_Callback) and never recomputes or changes it.
 %
@@ -569,23 +570,42 @@ keep=statesAboveMinPop(r.full.pop, handles);   % states below "Min population (%
 if ~isequal(size(handles.bobaLabelOffsets),[K 2])
     handles.bobaLabelOffsets=zeros(K,2);   % number of states changed since the last fit; drop old offsets
 end
-yOffset=0.04*diff(ylim(ax));               % default gap above each peak, in axes units
+% Default layout: every label sits in a row at the TOP of the plot, centered over its
+% state's center. Where two labels would overlap horizontally, the later (further right)
+% one steps down one label-height at a time until it clears. Manual drag offsets are
+% added on top of this default, as before.
+yl=ylim(ax);  xl=xlim(ax);
+yTop=yl(2)-0.02*diff(yl);                  % top edge of the first row of labels
 defaultPos=zeros(K,2);
 labels=gobjects(K,1);
 hold(ax,'on');
 for k=1:K
     if ~keep(k), continue; end
-    defaultPos(k,:)=[r.full.mu(k), r.full.amp(k)+yOffset];
-    pos=defaultPos(k,:)+handles.bobaLabelOffsets(k,:);
     labelStr=sprintf('State %d\n%.1f%% \\pm %.1f%%', k, 100*r.summary.popMean(k), 100*r.summary.popStd(k));
     if persistHandles
         buttonDownFcn = @(src,evt) startDragLabel(src,evt,ancestor(ax,'figure'));
     else
         buttonDownFcn = '';   % a one-off (e.g. saved) copy is never dragged
     end
-    labels(k)=text(ax, pos(1), pos(2), labelStr, 'HorizontalAlignment','center', ...
-        'FontSize',9, 'FontWeight','bold', 'Color',[0 0 0.6], 'Margin',1, ...
-        'ButtonDownFcn', buttonDownFcn, 'UserData', k);
+    % created at the top first, only so its on-screen size (Extent) can be measured
+    labels(k)=text(ax, r.full.mu(k), yTop, labelStr, 'HorizontalAlignment','center', ...
+        'VerticalAlignment','top', 'FontSize',9, 'FontWeight','bold', 'Color',[0 0 0.6], ...
+        'Margin',1, 'ButtonDownFcn', buttonDownFcn, 'UserData', k);
+end
+placed=zeros(0,4);                         % rectangles already taken: [x1 x2 y1 y2]
+for k=find(keep)                           % states are sorted by center, so this runs left to right
+    ext=get(labels(k),'Extent');           % [x y width height] in axes (data) units
+    w=ext(3);  h=ext(4);
+    cx=min(max(r.full.mu(k), xl(1)+w/2), xl(2)-w/2);   % keep the label inside the axes
+    yt=yTop;
+    while yt-h > yl(1)
+        clash=any(placed(:,1) < cx+w/2 & placed(:,2) > cx-w/2 & placed(:,3) < yt & placed(:,4) > yt-h);
+        if ~clash, break; end
+        yt=yt-1.05*h;                      % step down one label-height
+    end
+    placed(end+1,:)=[cx-w/2, cx+w/2, yt-h, yt]; %#ok<AGROW>
+    defaultPos(k,:)=[cx, yt];
+    set(labels(k),'Position',[defaultPos(k,:)+handles.bobaLabelOffsets(k,:), 0]);
 end
 hold(ax,'off');
 if persistHandles
@@ -595,8 +615,9 @@ if persistHandles
 end
 
 function drawBobaRanges(hObject, eventdata, handles, ax, persistHandles)
-% Cosmetic only: shades each state's mean +/- 1 SD range (a low-opacity patch)
-% and draws a dashed border line at each edge. Reads handles.bobaResults
+% Cosmetic only: shades each state's mean +/- N SD range, limited to the area under
+% that state's fitted Gaussian curve (a low-opacity patch), with a dashed edge line at
+% each end of the range that rises only as high as the curve there. Reads handles.bobaResults
 % (already computed by boba_Callback) and does not recompute or change it.
 %
 % "SD" here is the fitted state's own width (full.sigma, the native Gaussian
@@ -643,10 +664,21 @@ for k=1:K
     col=palette(mod(k-1,size(palette,1))+1,:);
     lo=r.full.mu(k)-rangeMult*r.full.sigma(k);
     hi=r.full.mu(k)+rangeMult*r.full.sigma(k);
-    patches(k)=patch(ax,[lo hi hi lo],[yl(1) yl(1) yl(2) yl(2)],col, ...
-        'FaceAlpha',0.15,'EdgeColor','none','HitTest','off');
-    borders(k,1)=line(ax,[lo lo],yl,'Color',col,'LineWidth',1.2,'LineStyle','--','HitTest','off');
-    borders(k,2)=line(ax,[hi hi],yl,'Color',col,'LineWidth',1.2,'LineStyle','--','HitTest','off');
+    % Shade only the area UNDER this state's fitted Gaussian curve, between lo and hi
+    % (not a full-height column): the polygon follows the curve along its top and runs
+    % back along the baseline. Uses the same BOBA full-data fit (amp, mu, sigma) as the
+    % range itself, and is clipped to the visible x- and y-range.
+    xl = xlim(ax);
+    xs = linspace(max(lo,xl(1)), min(hi,xl(2)), 200);
+    if numel(xs)>1 && xs(end)>xs(1)
+        gk = @(x) r.full.amp(k) .* gaussian(x, r.full.mu(k), r.full.sigma(k));
+        ys = min(gk(xs), yl(2));
+        patches(k)=patch(ax,[xs fliplr(xs)],[ys yl(1)*ones(size(xs))],col, ...
+            'FaceAlpha',0.3,'EdgeColor','none','HitTest','off');
+        % dashed edge lines rise only as high as the curve at each end of the range
+        borders(k,1)=line(ax,[lo lo],[yl(1) min(gk(lo),yl(2))],'Color',col,'LineWidth',1.2,'LineStyle','--','HitTest','off');
+        borders(k,2)=line(ax,[hi hi],[yl(1) min(gk(hi),yl(2))],'Color',col,'LineWidth',1.2,'LineStyle','--','HitTest','off');
+    end
 end
 hold(ax,'off');
 ylim(ax,yl);
@@ -694,11 +726,16 @@ if any(~keep)
     fprintf(fid,'# %d state(s) below %s%% population omitted below (still counted in every other state''s population)\n', ...
         sum(~keep), get(handles.minPopPercent,'String'));
 end
-fprintf(fid,'state,center_mean,center_sd,sigma_mean,sigma_sd,population_mean,population_sd,population_ci95_low,population_ci95_high\n');
+% The last four columns (center and sigma 95% intervals) were added after the original
+% layout, so they're appended at the end to keep earlier columns in the same positions.
+% Results computed before that addition have no muCI95/sigmaCI95 and write NaN there.
+if isfield(s,'muCI95'),    muCI=s.muCI95;       else, muCI=nan(2,numel(s.popMean));    end
+if isfield(s,'sigmaCI95'), sgCI=s.sigmaCI95;    else, sgCI=nan(2,numel(s.popMean));    end
+fprintf(fid,'state,center_mean,center_sd,sigma_mean,sigma_sd,population_mean,population_sd,population_ci95_low,population_ci95_high,center_ci95_low,center_ci95_high,sigma_ci95_low,sigma_ci95_high\n');
 for k=1:numel(s.popMean)
     if ~keep(k), continue; end
-    fprintf(fid,'%d,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n', k, s.muMean(k), s.muStd(k), s.sigmaMean(k), s.sigmaStd(k), ...
-        s.popMean(k), s.popStd(k), s.popCI95(1,k), s.popCI95(2,k));
+    fprintf(fid,'%d,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n', k, s.muMean(k), s.muStd(k), s.sigmaMean(k), s.sigmaStd(k), ...
+        s.popMean(k), s.popStd(k), s.popCI95(1,k), s.popCI95(2,k), muCI(1,k), muCI(2,k), sgCI(1,k), sgCI(2,k));
 end
 % per-bin histogram values and their bootstrap error bars
 fprintf(fid,'\nbin_center,mean_normalized_count,bootstrap_se,ci95_low,ci95_high\n');
